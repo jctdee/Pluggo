@@ -192,9 +192,8 @@ describe('/api/chat route', () => {
 
     const reqs = callRequests();
     expect(reqs.length).toBeGreaterThan(0);
-    for (const r of reqs) {
-      expect(r.model).toBe('claude-haiku-4-5-20251001');
-    }
+    const distinctModels = [...new Set(reqs.map((r) => r.model))];
+    expect(distinctModels).toEqual(['claude-haiku-4-5-20251001']);
   });
 
   it('max_tokens cap: every call to Claude has max_tokens between 1 and 512 (cost guard)', async () => {
@@ -209,10 +208,9 @@ describe('/api/chat route', () => {
 
     const reqs = callRequests();
     expect(reqs.length).toBeGreaterThan(0);
-    for (const r of reqs) {
-      expect(r.max_tokens).toBeGreaterThan(0);
-      expect(r.max_tokens).toBeLessThanOrEqual(512);
-    }
+    const tokens = reqs.map((r) => r.max_tokens);
+    expect(Math.min(...tokens)).toBeGreaterThan(0);
+    expect(Math.max(...tokens)).toBeLessThanOrEqual(512);
   });
 
   it('sanitization: driverMessage > 1000 chars is truncated before reaching Claude', async () => {
@@ -323,13 +321,23 @@ describe('/api/chat route', () => {
 
     const reqs = callRequests();
     expect(reqs.length).toBeGreaterThan(0);
-    for (const r of reqs) {
-      expect(typeof r.system).toBe('string');
-      expect(r.system).toMatch(/EV charging/i);
-      expect(r.system).toMatch(/Pluggobot/);
-      const toolNames = (r.tools ?? []).map((t) => t.name);
-      expect(toolNames).toContain('find_stations');
-      expect(toolNames).toContain('get_directions');
-    }
+
+    // Same invariants must hold across every call. Build a parallel array of
+    // matchers and assert the actual array equals it — failure output shows
+    // the offending index without an explicit loop.
+    const systems = reqs.map((r) => r.system);
+    expect(systems).toEqual(
+      systems.map(() => expect.stringMatching(/EV charging/i)),
+    );
+    expect(systems).toEqual(
+      systems.map(() => expect.stringMatching(/Pluggobot/)),
+    );
+
+    const toolNamesPerCall = reqs.map((r) =>
+      (r.tools ?? []).map((t) => t.name).sort(),
+    );
+    expect(toolNamesPerCall).toEqual(
+      toolNamesPerCall.map(() => ['find_stations', 'get_directions'].sort()),
+    );
   });
 });
