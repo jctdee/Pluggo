@@ -77,6 +77,7 @@ export default function Chatbot({
   const [sending, setSending] = useState(false);
   const [speakReplies, setSpeakReplies] = useState(true);
   const [pendingNav, setPendingNav] = useState<StationWithDistance | null>(null);
+  const [micNotice, setMicNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Keep latest stations/position/pending-nav/car in refs so the speech callback always reads fresh values.
@@ -278,6 +279,13 @@ export default function Chatbot({
   }
 
   function toggleMic() {
+    if (!speech.supported) {
+      setMicNotice(
+        "Voice input isn't supported in this browser — try Chrome on desktop, or type your message instead.",
+      );
+      return;
+    }
+    setMicNotice(null);
     if (speech.listening) speech.stop();
     else speech.start();
   }
@@ -288,7 +296,7 @@ export default function Chatbot({
         type="button"
         aria-label={open ? 'Close chat' : 'Open chat'}
         onClick={() => setOpen((o) => !o)}
-        className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-brand-500 text-ink-900 shadow-lg shadow-brand-600/40 transition hover:bg-brand-600 active:scale-95 sm:bottom-8 sm:right-8"
+        className={`fixed bottom-5 right-5 z-40 h-14 w-14 items-center justify-center rounded-full bg-brand-500 text-ink-900 shadow-lg shadow-brand-600/40 transition hover:bg-brand-600 active:scale-95 sm:bottom-8 sm:right-8 ${open ? 'hidden' : 'flex'}`}
       >
         {open ? <CloseIcon /> : <ChatIcon />}
       </button>
@@ -352,10 +360,15 @@ export default function Chatbot({
             {sending && <Bubble role="bot" text="…" />}
           </div>
 
-          {(speech.listening || speech.transcript || speech.error) && (
+          {(speech.listening ||
+            speech.transcript ||
+            speech.error ||
+            micNotice) && (
             <div className="border-t border-ink-800 px-4 py-2 text-xs">
               {speech.error ? (
                 <span className="text-red-300">{speech.error}</span>
+              ) : micNotice ? (
+                <span className="text-ink-300">{micNotice}</span>
               ) : (
                 <span className="text-ink-400">
                   <span className="mr-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-red-500 align-middle" />
@@ -372,21 +385,27 @@ export default function Chatbot({
             }}
             className="flex items-center gap-2 border-t border-ink-800 px-3 py-3"
           >
-            {speech.supported && (
-              <button
-                type="button"
-                aria-label={speech.listening ? 'Stop listening' : 'Start voice input'}
-                aria-pressed={speech.listening}
-                onClick={toggleMic}
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
-                  speech.listening
-                    ? 'bg-red-500 text-white animate-pulse'
-                    : 'bg-ink-800 text-ink-200 hover:bg-ink-700'
-                }`}
-              >
-                <MicIcon />
-              </button>
-            )}
+            <button
+              type="button"
+              aria-label={
+                !speech.supported
+                  ? 'Voice input not supported'
+                  : speech.listening
+                    ? 'Stop listening'
+                    : 'Start voice input'
+              }
+              aria-pressed={speech.listening}
+              onClick={toggleMic}
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${
+                speech.listening
+                  ? 'bg-red-500 text-white animate-pulse'
+                  : speech.supported
+                    ? 'bg-ink-800 text-ink-200 hover:bg-ink-700'
+                    : 'bg-ink-800/60 text-ink-400'
+              }`}
+            >
+              <MicIcon />
+            </button>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
