@@ -65,3 +65,9 @@ When extending the bot, prefer adding a branch in `classifyIntent` over expandin
 - `'use client'` is required on every interactive component — there is no server-component boundary above `AppShell` other than `app/page.tsx`.
 - Tailwind tokens `ink-*` (slate-ish neutrals) and `brand-*` (cyan) are defined in `tailwind.config.ts`. Stick to them rather than raw `#hex` values.
 - `next.config.mjs` sets `output: 'standalone'` for the Docker image — don't remove it without updating the `Dockerfile` COPY paths.
+
+## Code style
+
+- **No `any`.** Use proper types, generics, or `unknown` with a type guard. If a Web API isn't in `lib.dom.d.ts` (e.g. `webkitSpeechRecognition`), declare a minimal local interface — see `lib/useSpeechRecognition.ts` for the pattern.
+- **No `as SomeType` casting.** Use type guards or runtime validation. Casting hides bugs the compiler would otherwise catch.
+- **Guard clauses over nested `if`/`else`** in loops and handlers. The `Chatbot.handleSubmit` pipeline is the canonical example — each step `return`s early on match rather than nesting the next step inside an `else`.
