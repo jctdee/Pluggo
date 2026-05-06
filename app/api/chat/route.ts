@@ -25,18 +25,32 @@ import { PrimaryStationTracker } from '@/lib/chatbot/primary-station';
 
 export const runtime = 'edge';
 
-// Model + cost-shape defaults. Override per-deploy via env (CHAT_MODEL,
-// CHAT_MAX_TOKENS, CHAT_MAX_TOOL_ITERATIONS). Read once at module load —
-// Edge runtime evaluates this on each cold start, so a redeploy is enough
-// to pick up new values, no restart needed.
-function envInt(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
+// Model + cost-shape config. Required env vars — no in-source defaults so
+// the model id and limits never appear in the public repo. Read at request
+// time (not module load) so test setup can wire them per-suite. Missing or
+// invalid values short-circuit the request to the same generic 200 reply
+// used for a missing api key — the failure mode never reveals what's unset.
+function envInt(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
-const MODEL = process.env.CHAT_MODEL ?? 'claude-haiku-4-5-20251001';
-const MAX_TOKENS = envInt(process.env.CHAT_MAX_TOKENS, 512);
-const MAX_TOOL_ITERATIONS = envInt(process.env.CHAT_MAX_TOOL_ITERATIONS, 5);
+
+type RouteConfig = {
+  apiKey: string;
+  model: string;
+  maxTokens: number;
+  maxToolIterations: number;
+};
+
+function readConfig(): RouteConfig | null {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const model = process.env.CHAT_MODEL;
+  const maxTokens = envInt(process.env.CHAT_MAX_TOKENS);
+  const maxToolIterations = envInt(process.env.CHAT_MAX_TOOL_ITERATIONS);
+  if (!apiKey || !model || !maxTokens || !maxToolIterations) return null;
+  return { apiKey, model, maxTokens, maxToolIterations };
+}
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -215,7 +229,7 @@ function buildSystemPrompt(carId: string, position: { lat: number; lng: number }
 }
 
 async function callAnthropic(
-  apiKey: string,
+  cfg: RouteConfig,
   messages: AnthropicMessage[],
   system: string,
 ): Promise<AnthropicResponse> {
@@ -223,12 +237,12 @@ async function callAnthropic(
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': apiKey,
+      'x-api-key': cfg.apiKey,
       'anthropic-version': ANTHROPIC_VERSION,
     },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
+      model: cfg.model,
+      max_tokens: cfg.maxTokens,
       system,
       tools: TOOLS,
       messages,
@@ -326,10 +340,12 @@ export async function POST(req: Request) {
     return Response.json({ error: validated.error }, { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // Don't reveal whether the key is set in any other code path — the
-    // generic copy is the same one we use for upstream errors.
+  const cfg = readConfig();
+  if (!cfg) {
+    // Either ANTHROPIC_API_KEY, CHAT_MODEL, CHAT_MAX_TOKENS, or
+    // CHAT_MAX_TOOL_ITERATIONS is missing/invalid. Reply with the same
+    // generic copy used for upstream errors so the failure mode never
+    // reveals which env var is unset.
     return Response.json(
       { reply: "Sorry — I'm having trouble right now. Try again in a moment." },
       { status: 200 },
@@ -354,8 +370,8 @@ export async function POST(req: Request) {
   const tracker = new PrimaryStationTracker();
 
   try {
-    for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      const resp = await callAnthropic(apiKey, working, system);
+    for (let i = 0; i < cfg.maxToolIterations; i++) {
+      const resp = await callAnthropic(cfg, working, system);
       working.push({ role: 'assistant', content: resp.content });
 
       if (resp.stop_reason !== 'tool_use') {

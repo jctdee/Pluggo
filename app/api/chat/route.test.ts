@@ -15,18 +15,32 @@ import {
 const fetchMock = vi.fn();
 const realFetch = globalThis.fetch;
 const TEST_DEFAULT_KEY = 'test-default-key-not-real';
+// Test-suite values for the now-required CHAT_* env vars. Using non-real
+// values here doubles as the model-lock contract proof: assertions check
+// against these, so if anything ever wires the model id from somewhere
+// other than process.env it fails the test.
+const TEST_MODEL = 'test-model-id-xyz';
+const TEST_MAX_TOKENS = 256;
+const TEST_MAX_TOOL_ITERATIONS = 3;
 beforeAll(() => {
   globalThis.fetch = fetchMock as unknown as typeof fetch;
-  // The route bails early with a generic reply (and no fetch call) if no key
-  // is set. Every test in this file expects fetch to be called, so seed a
-  // default. The security describe overrides this with its own sentinel key
+  // The route bails with a generic reply (and no fetch call) if any of
+  // the required env vars is missing. Seed deterministic test values so
+  // every test in this file gets a real Claude call mocked through fetch.
+  // The security describe overrides ANTHROPIC_API_KEY with its own sentinel
   // and restores afterwards.
   if (!process.env.ANTHROPIC_API_KEY) {
     process.env.ANTHROPIC_API_KEY = TEST_DEFAULT_KEY;
   }
+  process.env.CHAT_MODEL = TEST_MODEL;
+  process.env.CHAT_MAX_TOKENS = String(TEST_MAX_TOKENS);
+  process.env.CHAT_MAX_TOOL_ITERATIONS = String(TEST_MAX_TOOL_ITERATIONS);
 });
 afterAll(() => {
   globalThis.fetch = realFetch;
+  delete process.env.CHAT_MODEL;
+  delete process.env.CHAT_MAX_TOKENS;
+  delete process.env.CHAT_MAX_TOOL_ITERATIONS;
 });
 
 import { POST } from './route';
@@ -86,7 +100,7 @@ function endTurn(text: string): Response {
     id: 'msg_end',
     type: 'message',
     role: 'assistant',
-    model: 'claude-haiku-4-5-20251001',
+    model: TEST_MODEL,
     content: [{ type: 'text', text }],
     stop_reason: 'end_turn',
     stop_sequence: null,
@@ -103,7 +117,7 @@ function toolUse(
     id: 'msg_tu',
     type: 'message',
     role: 'assistant',
-    model: 'claude-haiku-4-5-20251001',
+    model: TEST_MODEL,
     content: [{ type: 'tool_use', id: toolUseId, name, input }],
     stop_reason: 'tool_use',
     stop_sequence: null,
@@ -233,10 +247,10 @@ describe('/api/chat route', () => {
     const reqs = callRequests();
     expect(reqs.length).toBeGreaterThan(0);
     const distinctModels = [...new Set(reqs.map((r) => r.model))];
-    expect(distinctModels).toEqual(['claude-haiku-4-5-20251001']);
+    expect(distinctModels).toEqual([TEST_MODEL]);
   });
 
-  it('max_tokens cap: every call to Claude has max_tokens between 1 and 512 (cost guard)', async () => {
+  it('max_tokens cap: every call to Claude has max_tokens never exceeds the configured cap (cost guard)', async () => {
     fetchMock.mockResolvedValueOnce(endTurn('OK.'));
 
     await post({
@@ -250,7 +264,7 @@ describe('/api/chat route', () => {
     expect(reqs.length).toBeGreaterThan(0);
     const tokens = reqs.map((r) => r.max_tokens);
     expect(Math.min(...tokens)).toBeGreaterThan(0);
-    expect(Math.max(...tokens)).toBeLessThanOrEqual(512);
+    expect(Math.max(...tokens)).toBeLessThanOrEqual(TEST_MAX_TOKENS);
   });
 
   it('sanitization: driverMessage > 1000 chars is truncated before reaching Claude', async () => {
@@ -708,12 +722,12 @@ describe('/api/chat — security guardrails', () => {
     // Every call uses the hard-coded server-side model id — not whatever
     // the client tried to inject in the body.
     const distinctModels = [...new Set(reqs.map((r) => r.model))];
-    expect(distinctModels).toEqual(['claude-haiku-4-5-20251001']);
+    expect(distinctModels).toEqual([TEST_MODEL]);
 
     // Every call uses the bounded server-side max_tokens — never 999999.
     const tokens = reqs.map((r) => r.max_tokens);
     expect(Math.min(...tokens)).toBeGreaterThan(0);
-    expect(Math.max(...tokens)).toBeLessThanOrEqual(512);
+    expect(Math.max(...tokens)).toBeLessThanOrEqual(TEST_MAX_TOKENS);
 
     // The injection prompt text reaches Claude as transcript data only —
     // never as model config. It appears inside the wrapped user message,
@@ -759,11 +773,9 @@ describe('/api/chat — security guardrails', () => {
     const reqs = callRequests();
 
     // Server-controlled config is preserved.
-    expect([...new Set(reqs.map((r) => r.model))]).toEqual([
-      'claude-haiku-4-5-20251001',
-    ]);
+    expect([...new Set(reqs.map((r) => r.model))]).toEqual([TEST_MODEL]);
     expect(Math.max(...reqs.map((r) => r.max_tokens))).toBeLessThanOrEqual(
-      512,
+      TEST_MAX_TOKENS,
     );
 
     // Route builds its own system, tools, and messages — no forged values
@@ -1054,5 +1066,55 @@ describe('/api/chat — public-endpoint hardening', () => {
 
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalled();
+  });
+});
+
+describe('/api/chat — required env vars', () => {
+  // Each case unsets one required env var, asserts the route returns the
+  // generic 200 reply WITHOUT calling fetch (the failure mode never reveals
+  // which var is missing — same copy used for upstream errors), then restores
+  // for the next test. The model id and limits never appear in source — if
+  // env wiring breaks, every request silently fails closed instead of
+  // falling back to a baked-in default.
+  it.each([
+    ['CHAT_MODEL', () => process.env.CHAT_MODEL, (v: string) => { process.env.CHAT_MODEL = v; }],
+    ['CHAT_MAX_TOKENS', () => process.env.CHAT_MAX_TOKENS, (v: string) => { process.env.CHAT_MAX_TOKENS = v; }],
+    ['CHAT_MAX_TOOL_ITERATIONS', () => process.env.CHAT_MAX_TOOL_ITERATIONS, (v: string) => { process.env.CHAT_MAX_TOOL_ITERATIONS = v; }],
+  ])('missing %s returns generic 200 reply without calling Claude', async (_name, get, set) => {
+    const original = get();
+    delete process.env[_name];
+    try {
+      const res = await post({
+        driverMessage: 'hi',
+        priorTurns: [],
+        position: POS,
+        carId: 'any',
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.reply).toMatch(/having trouble/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      if (original !== undefined) set(original);
+    }
+  });
+
+  it('CHAT_MAX_TOKENS=non-integer is treated as missing', async () => {
+    const original = process.env.CHAT_MAX_TOKENS;
+    process.env.CHAT_MAX_TOKENS = 'not-a-number';
+    try {
+      const res = await post({
+        driverMessage: 'hi',
+        priorTurns: [],
+        position: POS,
+        carId: 'any',
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.reply).toMatch(/having trouble/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      if (original !== undefined) process.env.CHAT_MAX_TOKENS = original;
+    }
   });
 });
