@@ -8,9 +8,8 @@ import {
   normalizeOverridesForWire,
   type StationOverride,
 } from '@/lib/chatbot/overrides';
+import { isChatResponse, type Action } from '@/lib/chatbot/response';
 import type { Announcement, Position } from './AppShell';
-
-type Action = { label: string; href: string };
 
 type Message = {
   id: string;
@@ -181,21 +180,21 @@ export default function Chatbot({
           latestAnnouncement: announcementRef.current?.text,
         }),
       });
-      const data = (await res.json()) as {
-        reply: string;
-        actions?: Action[];
-        focusStationId?: string;
-      };
+      const raw: unknown = await res.json();
+      // Throw on shape mismatch so the existing catch below shows the
+      // generic "something went wrong" message. Never render unvalidated
+      // action hrefs onto the page.
+      if (!isChatResponse(raw)) throw new Error('invalid_chat_response');
       const replyText = carChanged
-        ? `Filtering for your ${activeCar.label}. ${data.reply}`
-        : data.reply;
+        ? `Filtering for your ${activeCar.label}. ${raw.reply}`
+        : raw.reply;
       setMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           role: 'bot',
           text: replyText,
-          actions: data.actions,
+          actions: raw.actions,
         },
       ]);
       announce(replyText);

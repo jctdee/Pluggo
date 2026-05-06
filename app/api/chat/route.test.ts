@@ -1110,6 +1110,89 @@ describe('/api/chat — public-endpoint hardening', () => {
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalled();
   });
+
+  it('size guard: oversized body WITHOUT content-length still returns 413', async () => {
+    // The streaming reader is the second line of defense — even when no
+    // content-length is sent (or it lies), accumulated bytes past the cap
+    // must abort before req.json() / Anthropic is reached.
+    const body = JSON.stringify({
+      driverMessage: 'x'.repeat(50_000),
+      priorTurns: [],
+      position: POS,
+      carId: 'any',
+    });
+    const res = await POST(
+      new Request('http://test/api/chat', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'http://localhost:3000',
+          // NB: deliberately no content-length header
+        },
+        body,
+      }),
+    );
+
+    expect(res.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['negative', '-1'],
+    ['non-numeric', 'abc'],
+    ['hex-prefixed', '0x100'],
+    ['fractional', '1.5'],
+  ])(
+    'size guard: invalid content-length (%s) returns 400 without calling Claude',
+    async (_label, headerValue) => {
+      const body = JSON.stringify({
+        driverMessage: 'hi',
+        priorTurns: [],
+        position: POS,
+        carId: 'any',
+      });
+      const res = await POST(
+        new Request('http://test/api/chat', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            origin: 'http://localhost:3000',
+            'content-length': headerValue,
+          },
+          body,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('size guard: oversized body WITH a fake-small content-length still returns 413', async () => {
+    // Belt + suspenders: a malicious caller could declare content-length: 10
+    // while sending 50KB. The streaming reader must still bounce it before
+    // the LLM is hit.
+    const body = JSON.stringify({
+      driverMessage: 'x'.repeat(50_000),
+      priorTurns: [],
+      position: POS,
+      carId: 'any',
+    });
+    const res = await POST(
+      new Request('http://test/api/chat', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'http://localhost:3000',
+          'content-length': '10',
+        },
+        body,
+      }),
+    );
+
+    expect(res.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('/api/chat — required env vars', () => {

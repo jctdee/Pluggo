@@ -115,8 +115,45 @@ const hits = new Map<string, number[]>();
 // legitimate body (~15 KB: 10 prior turns × 1000 chars + driverMessage +
 // announcement + overrides), tight enough to bounce payload-bloat attacks
 // before any JSON parsing or LLM call. Per-field truncation in the validator
-// still applies after this; this is the cheap pre-parse speed bump.
+// still applies after this. The cap is enforced two ways: a cheap header
+// pre-check (rejects bodies that *claim* to be too large), then a streaming
+// reader cap (rejects bodies that *actually* are too large, which catches
+// callers that omit content-length or send a fake one).
 const MAX_REQUEST_BYTES = 32 * 1024;
+
+type BodyReadResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: 'oversize' };
+
+// Streams req.body up to maxBytes; cancels and returns oversize if the limit
+// is hit before EOF. Used in place of req.text()/req.json() so a missing or
+// fake content-length can't trick the route into buffering an unbounded body.
+async function readBodyWithCap(
+  req: Request,
+  maxBytes: number,
+): Promise<BodyReadResult> {
+  if (!req.body) return { ok: true, text: '' };
+  const reader = req.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try {
+        await reader.cancel();
+      } catch {
+        // best-effort cleanup; the 413 response is what matters
+      }
+      return { ok: false, reason: 'oversize' };
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return { ok: true, text };
+}
 
 // Origin allowlist sources, in priority order:
 // 1. CHAT_ALLOWED_ORIGINS — comma-separated list, server-only, supports
@@ -355,11 +392,19 @@ function actionsFor(stationId: string): Action[] {
 }
 
 export async function POST(req: Request) {
-  // Cheap header-only guards before any body parsing or LLM work.
+  // Cheap header-only guards before any body work.
+  // 1. content-length: if the header is present, it must parse as a
+  //    non-negative integer. A negative or non-numeric value is a malformed
+  //    request — reject 400. A valid value above the cap → cheap 413.
+  //    The streaming reader below catches missing/fake content-length too,
+  //    but rejecting obviously-bad headers up front saves a body read.
   const contentLength = req.headers.get('content-length');
-  if (contentLength) {
+  if (contentLength !== null) {
     const bytes = parseInt(contentLength, 10);
-    if (Number.isFinite(bytes) && bytes > MAX_REQUEST_BYTES) {
+    if (!Number.isFinite(bytes) || bytes < 0 || String(bytes) !== contentLength.trim()) {
+      return new Response('Invalid content-length', { status: 400 });
+    }
+    if (bytes > MAX_REQUEST_BYTES) {
       return new Response('Payload too large', { status: 413 });
     }
   }
@@ -373,9 +418,17 @@ export async function POST(req: Request) {
     return new Response('Too many requests', { status: 429 });
   }
 
+  // 2. Streaming body cap: even with a missing or lying content-length,
+  //    the reader bails as soon as accumulated bytes exceed MAX_REQUEST_BYTES.
+  //    Replaces req.json() — JSON.parse runs on the size-bounded text below.
+  const read = await readBodyWithCap(req, MAX_REQUEST_BYTES);
+  if (!read.ok) {
+    return new Response('Payload too large', { status: 413 });
+  }
+
   let body: unknown;
   try {
-    body = await req.json();
+    body = JSON.parse(read.text);
   } catch {
     return Response.json({ error: 'invalid json' }, { status: 400 });
   }
